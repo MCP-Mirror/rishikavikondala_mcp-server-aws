@@ -15,8 +15,11 @@ from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 from mcp.types import Resource, Tool, TextContent, ImageContent, EmbeddedResource
 from pydantic import AnyUrl
-from .tools import get_aws_tools
-from .utils import get_dynamodb_type
+from mcp_server_aws.tools import get_aws_tools
+from mcp_server_aws.utils import get_dynamodb_type
+from mcp.server.sse import SseServerTransport
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -93,12 +96,12 @@ class AWSManager:
         }
         self.audit_entries.append(audit_entry)
 
+server = Server("aws-mcp-server")
 
 async def main():
     logger.info("Starting AWS MCP Server")
 
     aws = AWSManager()
-    server = Server("aws-mcp-server")
 
     logger.debug("Registering handlers")
 
@@ -358,11 +361,31 @@ async def main():
             logger.error(f"Operation failed: {str(e)}")
             raise RuntimeError(f"Operation failed: {str(e)}")
 
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        logger.info("Server running with stdio transport")
+    # async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+    #     logger.info("Server running with stdio transport")
+    #     await server.run(
+    #         read_stream,
+    #         write_stream,
+    #         InitializationOptions(
+    #             server_name="mcp-server-aws",
+    #             server_version="0.1.0",
+    #             capabilities=server.get_capabilities(
+    #                 notification_options=NotificationOptions(),
+    #                 experimental_capabilities={},
+    #             ),
+    #         ),
+    #     )
+
+sse = SseServerTransport("/messages/")
+
+async def handle_sse(request):
+
+    async with sse.connect_sse(
+        request.scope, request.receive, request._send
+    ) as streams:
         await server.run(
-            read_stream,
-            write_stream,
+            streams[0],
+            streams[1],
             InitializationOptions(
                 server_name="mcp-server-aws",
                 server_version="0.1.0",
@@ -373,5 +396,14 @@ async def main():
             ),
         )
 
+web_app = Starlette(routes=[
+    Route("/sse", endpoint=handle_sse),
+    Mount("/messages/", app=sse.handle_post_message),
+    Mount("/messages", app=sse.handle_post_message),
+])
+
+
 if __name__ == "__main__":
     asyncio.run(main())
+    import uvicorn
+    uvicorn.run(web_app, host="0.0.0.0", port=8000)
